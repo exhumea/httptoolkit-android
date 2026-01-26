@@ -15,7 +15,7 @@ val PORT_DESCRIPTIONS = mapOf(
     8008 to "Alternative HTTP port",
     8080 to "Popular local development HTTP port",
     8090 to "Popular local development HTTP port",
-    8433 to "Alternative HTTPS port",
+    8443 to "Alternative HTTPS port",
     8888 to "Popular local development HTTP port",
     9000 to "Popular local development HTTP port"
 )
