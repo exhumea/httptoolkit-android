@@ -123,7 +123,7 @@ class HttpToolkitApplication : Application() {
         return suspendCoroutine { cont ->
             val wasResumed = AtomicBoolean()
             val resume = { value: String? ->
-                if (wasResumed.getAndSet(true)) {
+                if (!wasResumed.getAndSet(true)) {
                     cont.resume(value)
                 }
             }
