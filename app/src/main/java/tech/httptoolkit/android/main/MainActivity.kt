@@ -189,7 +189,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                         interceptedPorts = interceptedPorts
                     ),
                     actions = MainScreenActions(
-                        onScanQRCode = { checkCameraPermission() },
+                        onScanQRCode = { scanOrPasteQRCode() },
                         onReconnect = { reconnect() },
                         onDisconnect = { disconnect() },
                         onRecoverAfterFailure = { recoverAfterFailure() },
@@ -346,6 +346,38 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
     @MainThread
+    private fun scanOrPasteQRCode() {
+        // On an emulator (no camera) or some physical setups, it's useful to be able to just
+        // copy the URL instead of having to use the camera, so check that first:
+        val clipboardUrl = getConnectUrlFromClipboard()
+        if (clipboardUrl != null) {
+            Log.i(TAG, "Connecting from clipboard URL")
+            launch { connectToVpnFromUrl(clipboardUrl) }
+            return
+        }
+
+        if (packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY)) {
+            checkCameraPermission()
+        } else {
+            // No camera to fall back to, no clipboard URL - just explain
+            MaterialAlertDialogBuilder(this)
+                .setTitle("No connect URL or camera available")
+                .setMessage("Copy an HTTP Toolkit QR code URL to the clipboard then try again.")
+                .setPositiveButton(android.R.string.ok) { _, _ -> }
+                .show()
+        }
+    }
+
+    private fun getConnectUrlFromClipboard(): String? {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            ?: return null
+        val clip = clipboard.primaryClip
+        if (clip == null || clip.itemCount == 0) return null
+
+        val text = clip.getItemAt(0).coerceToText(this)?.toString()?.trim() ?: return null
+        return if (text.startsWith(Constants.QR_CODE_URL_PREFIX)) text else null
+    }
+
     private fun checkCameraPermission() {
         val canUseCamera = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
         if (canUseCamera == PERMISSION_GRANTED) {
