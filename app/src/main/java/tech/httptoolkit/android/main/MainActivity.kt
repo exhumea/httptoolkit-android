@@ -34,8 +34,6 @@ import com.google.android.gms.common.GooglePlayServicesUtil
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import io.sentry.Sentry
 import kotlinx.coroutines.*
-import java.net.ConnectException
-import java.net.SocketTimeoutException
 import java.security.cert.Certificate
 import java.security.cert.X509Certificate
 import androidx.core.net.toUri
@@ -442,10 +440,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
             mainState = ConnectionState.FAILED
 
-            // We report errors only that aren't simple connection failures
-            if (e !is SocketTimeoutException && e !is ConnectException) {
-                Sentry.captureException(e)
-            }
+            Sentry.captureException(e)
         }
     }
 
@@ -572,8 +567,16 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             // If we tried to enable notifications, and it didn't work (the user
             // ignored us) then try try again.
             requestNotificationPermission(true)
+        } else if (resultCode == RESULT_CANCELED) {
+            mainState = ConnectionState.DISCONNECTED
         } else {
-            Sentry.captureMessage("Non-OK result $resultCode for requestCode $requestCode")
+            val requestName = when (requestCode) {
+                START_VPN_REQUEST -> "start-vpn"
+                INSTALL_CERT_REQUEST -> "install-cert"
+                ENABLE_NOTIFICATIONS_REQUEST -> "enable-notifications"
+                else -> "other"
+            }
+            Sentry.captureMessage("Non-OK result $resultCode for $requestName request")
             mainState = ConnectionState.FAILED
         }
     }
@@ -614,10 +617,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
                 mainState = ConnectionState.FAILED
 
-                // We report errors only that aren't simple connection failures
-                if (e !is SocketTimeoutException && e !is ConnectException) {
-                    Sentry.captureException(e)
-                }
+                Sentry.captureException(e)
             }
         }
     }

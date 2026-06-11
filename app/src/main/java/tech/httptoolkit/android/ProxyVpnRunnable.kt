@@ -8,11 +8,9 @@ import tech.httptoolkit.android.vpn.SessionHandler
 import tech.httptoolkit.android.vpn.SessionManager
 import tech.httptoolkit.android.vpn.socket.SocketNIODataService
 import io.sentry.Sentry
-import tech.httptoolkit.android.vpn.transport.PacketHeaderException
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InterruptedIOException
-import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
@@ -80,23 +78,8 @@ class ProxyVpnRunnable(
                         packet.limit(length)
                         handler.handlePacket(packet)
                     } catch (e: Exception) {
-                        val errorMessage = (e.message ?: e.toString())
-                        Log.e(TAG, errorMessage)
-
-                        val isIgnorable =
-                            (e is ConnectException && errorMessage == "Permission denied") ||
-                            // Nothing we can do if the internet goes down:
-                            (e is ConnectException && errorMessage == "Network is unreachable") ||
-                            (e is ConnectException && errorMessage.contains("ENETUNREACH")) ||
-                            // Too many open files - can't make more sockets, not much we can do:
-                            (e is ConnectException && errorMessage == "Too many open files") ||
-                            (e is ConnectException && errorMessage.contains("EMFILE")) ||
-                            // IPv6 is not supported here yet:
-                            (e is PacketHeaderException && errorMessage.contains("IP version should be 4 but was 6"))
-
-                        if (!isIgnorable) {
-                            Sentry.captureException(e)
-                        }
+                        Log.e(TAG, e.message ?: e.toString())
+                        Sentry.captureException(e)
                     }
 
                     packet.clear()

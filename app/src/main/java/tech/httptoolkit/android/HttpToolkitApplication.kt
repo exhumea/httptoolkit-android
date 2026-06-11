@@ -12,7 +12,6 @@ import com.android.installreferrer.api.InstallReferrerClient.InstallReferrerResp
 import com.android.installreferrer.api.InstallReferrerStateListener
 import com.beust.klaxon.Json
 import com.beust.klaxon.Klaxon
-import io.sentry.Sentry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import net.swiftzer.semver.SemVer
@@ -71,8 +70,12 @@ class HttpToolkitApplication : Application() {
         super.onCreate()
         prefs = getSharedPreferences(HTTP_TOOLKIT_PREFERENCES_NAME, MODE_PRIVATE)
 
-        Thread.setDefaultUncaughtExceptionHandler { _, _ ->
+        initSentry(this)
+
+        val previousUncaughtHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             prefs.edit { putBoolean(APP_CRASHED_PREF, true) }
+            previousUncaughtHandler?.uncaughtException(thread, throwable)
         }
 
         // Check if we've been recreated unexpectedly, with no crashes in the meantime:
@@ -80,10 +83,6 @@ class HttpToolkitApplication : Application() {
         prefs.edit { putBoolean(APP_CRASHED_PREF, false) }
 
         vpnWasKilled = vpnShouldBeRunning && !isVpnActive() && !appCrashed && !isProbablyEmulator
-        if (vpnWasKilled) {
-            Sentry.captureMessage("VPN killed in the background")
-            // The UI will show an alert next time the MainActivity is created.
-        }
 
         Log.i(TAG, "App created")
     }
