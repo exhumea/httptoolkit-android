@@ -718,14 +718,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     Html.fromHtml(
                         """
                         <p>
-                            ${
-                                if (PROMPTED_CERT_SETUP_SUPPORTED)
-                                    "Automatic certificate installation failed, so it must be done manually."
-                                else
-                                    "Android ${Build.VERSION.RELEASE} doesn't allow automatic certificate setup."
-                            }
-                        </p>
-                        <p>
                             To allow HTTP Toolkit to intercept HTTPS traffic:
                         </p>
                         <ul>
