@@ -172,7 +172,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
                     setMetered(false)
                 }
             }
-            .setMtu(MAX_PACKET_LEN) // Limit the packet size to the buffer used by ProxyVpnRunnable
+            .setMtu(VPN_MTU)
             .setBlocking(true) // We use a blocking loop to read in ProxyVpnRunnable
             .apply {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

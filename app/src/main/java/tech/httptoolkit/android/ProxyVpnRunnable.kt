@@ -14,8 +14,15 @@ import java.io.InterruptedIOException
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 
-// Set on our VPN as the MTU, which should guarantee all packets fit this
+// The read buffer size. Must be >= VPN_MTU, so that every packet fits.
 const val MAX_PACKET_LEN = 1500
+
+// The MTU set on our VPN interface. Deliberately just below IPV6_MIN_MTU (1280): the kernel
+// refuses to attach an inet6_dev to an interface below that, so the tun never gets a link-local
+// address, and intercepted apps see a genuinely IPv4-only network rather than one that looks
+// v6-capable but silently blackholes it. Raising this to >= 1280 re-enables IPv6 on the tun.
+// Still leaves 1251 bytes of UDP payload, above QUIC's 1200 byte minimum.
+const val VPN_MTU = 1279
 
 class ProxyVpnRunnable(
     vpnInterface: ParcelFileDescriptor,
