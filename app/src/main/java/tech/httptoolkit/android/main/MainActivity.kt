@@ -163,6 +163,15 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             }
         }
 
+    private var localNetworkPermissionResult: CompletableDeferred<Boolean>? = null
+
+    private val localNetworkPermissionHandler =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+            Log.i(TAG, "Local network permission ${if (isGranted) "granted" else "rejected"}")
+            localNetworkPermissionResult?.complete(isGranted)
+            localNetworkPermissionResult = null
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -421,6 +430,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     private suspend fun reconnect(lastProxy: ProxyConfig) {
         mainState = ConnectionState.CONNECTING
 
+        ensureLocalNetworkPermission()
+
         try {
             // Revalidates the config, to ensure the server is available (and drop retries if not)
             val config = getProxyConfig(
@@ -606,6 +617,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         ) return
 
         mainState = ConnectionState.CONNECTING
+
+        ensureLocalNetworkPermission()
 
         withContext(Dispatchers.IO) {
             try {
@@ -863,6 +876,67 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 requestNotificationPermission(true)
             }
         }
+
+    /**
+     * From Android 17, reaching the local network requires an explicit runtime permission. Without
+     * it TCP connections to LAN addresses time out rather than failing outright, so we ask for it
+     * before we start probing for the proxy. Loopback isn't restricted, so a rejection still leaves
+     * ADB-tunnel connections working, and we continue regardless.
+     */
+    private suspend fun ensureLocalNetworkPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.CINNAMON_BUN) return
+
+        if (
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_LOCAL_NETWORK)
+                == PERMISSION_GRANTED
+        ) return
+
+        val result = CompletableDeferred<Boolean>()
+        withContext(Dispatchers.Main) {
+            Log.i(TAG, "Asking for ACCESS_LOCAL_NETWORK")
+            localNetworkPermissionResult = result
+            localNetworkPermissionHandler.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+        }
+
+        if (!result.await()) {
+            withContext(Dispatchers.Main) { showLocalNetworkPermissionRejectedAlert() }
+        }
+    }
+
+    private fun showLocalNetworkPermissionRejectedAlert() {
+        // If we can still show a rationale we're allowed to ask again, so a later connection
+        // attempt will reprompt. If not, only the settings page can fix this.
+        val canAskAgain = ActivityCompat.shouldShowRequestPermissionRationale(
+            this,
+            Manifest.permission.ACCESS_LOCAL_NETWORK
+        )
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Local network permission required")
+            .setIcon(R.drawable.ic_exclamation_triangle)
+            .setMessage(
+                "HTTP Toolkit needs local network access to reach HTTP Toolkit running on your " +
+                "computer, and to intercept traffic sent to your local network." +
+                if (canAskAgain) "" else
+                    "\n\n" +
+                    "To allow this, enable the 'Nearby devices' permission for HTTP Toolkit in " +
+                    "your device settings."
+            )
+            .apply {
+                if (canAskAgain) {
+                    setPositiveButton(android.R.string.ok) { _, _ -> }
+                } else {
+                    setPositiveButton(getString(R.string.open_settings)) { _, _ ->
+                        startActivity(Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", packageName, null)
+                        ))
+                    }
+                    setNegativeButton(getString(R.string.cancel)) { _, _ -> }
+                }
+            }
+            .show()
+    }
 
     private suspend fun promptToUpdate() {
         withContext(Dispatchers.Main) {
