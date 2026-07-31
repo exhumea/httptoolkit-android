@@ -7,6 +7,7 @@ object IntentExtras {
     const val PROXY_CONFIG_EXTRA = "tech.httptoolkit.android.PROXY_CONFIG"
     const val UNINTERCEPTED_APPS_EXTRA = "tech.httptoolkit.android.UNINTERCEPTED_APPS"
     const val INTERCEPTED_PORTS_EXTRA = "tech.httptoolkit.android.INTERCEPTED_PORTS"
+    const val VPN_FAILED_EXTRA = "tech.httptoolkit.android.VPN_FAILED"
 }
 
 object Constants {

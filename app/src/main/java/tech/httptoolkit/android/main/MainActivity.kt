@@ -75,6 +75,10 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             } else if (intent.action == VPN_STOPPED_BROADCAST) {
                 mainState = ConnectionState.DISCONNECTED
                 currentProxyConfig = null
+
+                if (intent.getBooleanExtra(IntentExtras.VPN_FAILED_EXTRA, false)) {
+                    showActiveVpnFailureAlert()
+                }
             }
         }
     }
@@ -87,10 +91,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     private var totalAppCount: Int by mutableIntStateOf(0)
     private var interceptedAppCount: Int by mutableIntStateOf(0)
     private var interceptedPorts: Set<Int> by mutableStateOf(emptySet())
-
-    // Used to track extremely fast VPN setup failures, indicating setup issues (rather than
-    // manual user cancellation). Doesn't matter that it's not properly persistent.
-    private var lastPauseTime = -1L
 
     val pickAppsContract = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == RESULT_OK) {
@@ -260,7 +260,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     override fun onPause() {
         super.onPause()
         Log.d(TAG, "onPause")
-        this.lastPauseTime = System.currentTimeMillis()
     }
 
     override fun onDestroy() {
@@ -548,18 +547,6 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 Log.i(TAG, "Notifications OK, starting VPN...")
                 startVpn()
             }
-        } else if (
-            requestCode == START_VPN_REQUEST &&
-            System.currentTimeMillis() - lastPauseTime < 200 && // On Pixel 4a it takes < 50ms
-            resultCode == RESULT_CANCELED
-        ) {
-            // If another always-on VPN is active, VPN start requests fail instantly as cancelled.
-            // We can't check that the VPN is always-on, but given an instant failure that's
-            // the likely cause, so we warn about it:
-            showActiveVpnFailureAlert()
-
-            // Then go back to the disconnected state:
-            mainState = ConnectionState.DISCONNECTED
         } else if (
             requestCode == INSTALL_CERT_REQUEST &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q // Required for promptToManuallyInstallCert
@@ -1016,15 +1003,18 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
     private fun showActiveVpnFailureAlert() {
+        // The VPN service can report failures while we're in the background:
+        if (isFinishing || isDestroyed) return
+
         MaterialAlertDialogBuilder(this)
             .setTitle("VPN setup failed")
             .setIcon(R.drawable.ic_exclamation_triangle)
             .setMessage(
                 "HTTP Toolkit could not be configured as a VPN on your device." +
                 "\n\n" +
-                "This usually means you have an always-on VPN configured, which blocks " +
-                "installation of other VPNs. To activate HTTP Toolkit you'll need to " +
-                "deactivate that VPN first."
+                "This usually means another VPN is active, which blocks HTTP Toolkit's VPN. To " +
+                "activate HTTP Toolkit you'll need to deactivate that VPN first, including any " +
+                "always-on or auto-reconnect options."
             )
             .setNegativeButton("Cancel") { _, _ -> }
             .setPositiveButton("Open VPN Settings") { _, _ ->

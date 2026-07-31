@@ -8,6 +8,7 @@ import android.net.ProxyInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
@@ -28,6 +29,10 @@ const val STOP_VPN_ACTION = "tech.httptoolkit.android.STOP_VPN_ACTION"
 
 const val VPN_STARTED_BROADCAST = "tech.httptoolkit.android.VPN_STARTED_BROADCAST"
 const val VPN_STOPPED_BROADCAST = "tech.httptoolkit.android.VPN_STOPPED_BROADCAST"
+
+// If our VPN is revoked this quickly after starting, we assume another VPN took it from us,
+// rather than the user having deliberately turned us off:
+private const val VPN_TAKEOVER_THRESHOLD_MS = 1000
 
 private var currentService: ProxyVpnService? = null
 fun isVpnActive(): Boolean {
@@ -51,6 +56,8 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         private set
 
     private var vpnInterface: ParcelFileDescriptor? = null
+
+    private var vpnStartedAt = 0L
     private var vpnRunnable: ProxyVpnRunnable? = null
 
     override fun onCreate() {
@@ -89,7 +96,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
                 return Service.START_REDELIVER_INTENT
             } else {
                 // We failed to start somehow - cleanup
-                stopVpn()
+                stopVpn(failed = true)
             }
         } else if (intent.action == STOP_VPN_ACTION) {
             stopVpn()
@@ -103,7 +110,8 @@ class ProxyVpnService : VpnService(), IProtectSocket {
     override fun onRevoke() {
         super.onRevoke()
         Log.i(TAG, "onRevoke called")
-        stopVpn()
+        val runtime = SystemClock.elapsedRealtime() - vpnStartedAt
+        stopVpn(failed = runtime < VPN_TAKEOVER_THRESHOLD_MS)
     }
 
     private fun showServiceNotification() {
@@ -232,6 +240,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
             return false
         } else {
             this.vpnInterface = vpnInterface
+            this.vpnStartedAt = SystemClock.elapsedRealtime()
         }
 
         app.lastProxy = proxyConfig
@@ -281,8 +290,8 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         return startVpn(proxyConfig, uninterceptedApps, interceptedPorts)
     }
 
-    private fun stopVpn() {
-        Log.i(TAG, "VPN stopping...")
+    private fun stopVpn(failed: Boolean = false) {
+        Log.i(TAG, if (failed) "VPN stopping after failure..." else "VPN stopping...")
 
         if (vpnRunnable != null) {
             vpnRunnable!!.stop()
@@ -297,7 +306,9 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         }
 
         stopForeground(true)
-        localBroadcastManager!!.sendBroadcast(Intent(VPN_STOPPED_BROADCAST))
+        localBroadcastManager!!.sendBroadcast(Intent(VPN_STOPPED_BROADCAST).apply {
+            putExtra(IntentExtras.VPN_FAILED_EXTRA, failed)
+        })
         stopSelf()
 
         currentService = null
