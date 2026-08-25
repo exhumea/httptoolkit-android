@@ -9,9 +9,7 @@ import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import android.os.PowerManager
-import android.provider.MediaStore
 import android.provider.Settings
 import android.security.KeyChain
 import android.security.KeyChain.EXTRA_CERTIFICATE
@@ -421,6 +419,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         currentProxyConfig = null
         mainState = ConnectionState.DISCONNECTING
 
+        // Any cert we downloaded is only useful for a connection we're now dropping, and the
+        // next setup attempt downloads it again:
+        launch {
+            withContext(Dispatchers.IO) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) deleteDownloadedCerts()
+            }
+        }
+
         startService(Intent(this, ProxyVpnService::class.java).apply {
             action = STOP_VPN_ACTION
         })
@@ -542,6 +548,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 ensureCertificateTrusted(currentProxyConfig!!)
             } else if (requestCode == INSTALL_CERT_REQUEST) {
                 Log.i(TAG, "Cert installed, checking notification perms...")
+                deleteDownloadedCertsIfTrusted()
                 ensureNotificationsEnabled()
             } else if (requestCode == ENABLE_NOTIFICATIONS_REQUEST) {
                 Log.i(TAG, "Notifications OK, starting VPN...")
@@ -555,12 +562,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             // via prompt. We redo the manual step regardless: either (on modern Android) manual is
             // required so this is just reshowing the instructions, or it was automated but that's not
             // working for some reason, in which case manual setup is a best-effort fallback.
-            launch {
-                promptToManuallyInstallCert(
-                    currentProxyConfig!!.certificate,
-                    repeatPrompt = true
-                )
-            }
+            launch { promptToManuallyInstallCert(currentProxyConfig!!.certificate) }
         } else if (requestCode == ENABLE_NOTIFICATIONS_REQUEST) {
             // If we tried to enable notifications, and it didn't work (the user
             // ignored us) then try try again.
@@ -638,8 +640,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 // a normal user cert.
                 launch { promptToAutoInstallCert(proxyConfig.certificate) }
             } else {
-                // Android 11+, with no trusted cert: we need to download the cert to Downloads and
-                // then tell the user how to install it manually:
+                // Android 11+, with no trusted cert: we need to tell the user how to install it
+                // manually, and download the cert to Downloads for them to select:
                 launch { promptToManuallyInstallCert(proxyConfig.certificate) }
             }
         } else {
@@ -670,46 +672,13 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     certInstallIntent.putExtra(EXTRA_CERTIFICATE, certificate.encoded)
                     startActivityForResult(certInstallIntent, INSTALL_CERT_REQUEST)
                 }
-                .setNeutralButton("Skip") { _, _ ->
-                    onActivityResult(INSTALL_CERT_REQUEST, RESULT_OK, null)
-                }
-                .setNegativeButton("Cancel") { _, _ ->
-                    disconnect()
-                }
-                .setCancelable(false)
+                .setCertSetupChoices()
                 .show()
         }
     }
 
     @RequiresApi(Build.VERSION_CODES.Q)
-    private suspend fun promptToManuallyInstallCert(cert: Certificate, repeatPrompt: Boolean = false) {
-        if (!repeatPrompt) {
-            // Get ready to save the cert to downloads:
-            val downloadsUri =
-                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-
-            val contentDetails = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, "HTTP Toolkit Certificate.crt")
-                put(MediaStore.Downloads.MIME_TYPE, "application/x-x509-ca-cert")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
-
-            val certUri = contentResolver.insert(downloadsUri, contentDetails)
-                ?: throw RuntimeException("Could not get download cert URI")
-
-            // Write cert contents to a file:
-            withContext(Dispatchers.IO) {
-                contentResolver.openFileDescriptor(certUri, "w", null).use { f ->
-                    ParcelFileDescriptor.AutoCloseOutputStream(f).write(cert.encoded)
-                }
-            }
-
-            // All done, mark it as such:
-            contentDetails.clear()
-            contentDetails.put(MediaStore.Downloads.IS_PENDING, 0)
-            contentResolver.update(certUri, contentDetails, null, null)
-        }
-
+    private suspend fun promptToManuallyInstallCert(cert: Certificate) {
         withContext(Dispatchers.Main) {
             MaterialAlertDialogBuilder(this@MainActivity)
                 .setTitle("Manual setup required")
@@ -736,23 +705,84 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                                     """
                             }
                             <li>&nbsp; Select "<b>Install a certificate</b>", then "<b>CA Certificate</b>"</li>
-                            <li>&nbsp; <b>Select the HTTP Toolkit certificate in your Downloads folder</b></li>
+                            <li>&nbsp; <b>Select "$CERT_DOWNLOAD_FILENAME" in your Downloads folder</b></li>
                         </ul>
                     """, 0)
                 )
                 .setPositiveButton("Open security settings") { _, _ ->
-                    startActivityForResult(Intent(Settings.ACTION_SECURITY_SETTINGS), INSTALL_CERT_REQUEST)
+                    // Scoped to the activity explicitly, as the scope that built this dialog
+                    // has long since completed:
+                    this@MainActivity.launch { saveCertAndOpenSecuritySettings(cert) }
                 }
-                .setNeutralButton("Skip") { _, _ ->
-                    onActivityResult(INSTALL_CERT_REQUEST, RESULT_OK, null)
-                }
-                .setNegativeButton("Cancel") { _, _ ->
-                    disconnect()
-                }
-                .setCancelable(false)
+                .setCertSetupChoices()
                 .show()
         }
     }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private suspend fun saveCertAndOpenSecuritySettings(cert: Certificate) {
+        val certSaved = saveCertToDownloads(cert)
+        if (isFinishing || isDestroyed) return // We might've been destroyed while saving
+
+        if (certSaved) {
+            startActivityForResult(Intent(Settings.ACTION_SECURITY_SETTINGS), INSTALL_CERT_REQUEST)
+        } else {
+            // The instructions are useless without the file, and worse than useless if an
+            // outdated cert from a previous setup is still sitting in downloads:
+            showCertDownloadFailedAlert(cert)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.Q)
+    private fun showCertDownloadFailedAlert(cert: Certificate) {
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Certificate download failed")
+            .setIcon(R.drawable.ic_exclamation_triangle)
+            .setMessage(
+                "HTTP Toolkit could not save its certificate into your Downloads folder, so " +
+                "there's no certificate there for you to install." +
+                "\n\n" +
+                "Check that your device has storage space available, and then try again."
+            )
+            .setPositiveButton("Try again") { _, _ ->
+                launch { saveCertAndOpenSecuritySettings(cert) }
+            }
+            .setCertSetupChoices()
+            .show()
+    }
+
+    /**
+     * Drop our downloaded copy of the cert, once it's actually trusted. We check that explicitly
+     * because this is reached by skipping the prompt too, where a cert downloaded by an earlier
+     * attempt may still be there, and may still be wanted.
+     */
+    private fun deleteDownloadedCertsIfTrusted() {
+        val proxyConfig = currentProxyConfig ?: return
+
+        launch {
+            withContext(Dispatchers.IO) {
+                if (
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    whereIsCertTrusted(proxyConfig) != null
+                ) {
+                    deleteDownloadedCerts()
+                }
+            }
+        }
+    }
+
+    /**
+     * The options shared by every cert setup prompt. Skipping continues the rest of setup as if
+     * the cert had been installed, leaving HTTPS interception broken until it really is.
+     */
+    private fun MaterialAlertDialogBuilder.setCertSetupChoices() = this
+        .setNeutralButton("Skip") { _, _ ->
+            onActivityResult(INSTALL_CERT_REQUEST, RESULT_OK, null)
+        }
+        .setNegativeButton("Cancel") { _, _ ->
+            disconnect()
+        }
+        .setCancelable(false)
 
     private fun ensureNotificationsEnabled() {
         if (areNotificationsEnabled()) {
