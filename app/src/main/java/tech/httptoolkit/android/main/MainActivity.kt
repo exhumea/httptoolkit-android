@@ -215,16 +215,19 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         // Are we being opened by an intent? I.e. a barcode scan/URL elsewhere on the device
         if (intent != null) {
             onNewIntent(intent)
-        } else {
-            // If not, check if this is a post-install run, and if so configure automatically
-            // using the install referrer
+        }
+
+        val isConnectionIntent = intent?.action.let {
+            it == Intent.ACTION_VIEW || it == ACTIVATE_INTENT || it == DEACTIVATE_INTENT
+        }
+        if (!isConnectionIntent) {
             launch {
                 val firstRunParams = app.popFirstRunParams()
                 if (
                     firstRunParams != null &&
                     firstRunParams.startsWith("https://android.httptoolkit.tech/connect/")
                 ) {
-                    launch { connectToVpnFromUrl(firstRunParams) }
+                    connectToVpnFromUrl(firstRunParams)
                 }
             }
         }
