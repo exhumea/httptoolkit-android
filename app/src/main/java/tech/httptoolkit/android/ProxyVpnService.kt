@@ -3,6 +3,7 @@ package tech.httptoolkit.android
 import android.app.*
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
 import android.net.ProxyInfo
 import android.net.VpnService
@@ -114,6 +115,13 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         stopVpn(failed = runtime < VPN_TAKEOVER_THRESHOLD_MS)
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // We shouldn't ever hit a foreground service timeout, given our exemption, but if we
+        // do then we must shut down promptly, or the system will kill the whole process.
+        Log.w(TAG, "onTimeout called for foreground service type $fgsType")
+        stopVpn()
+    }
+
     private fun showServiceNotification() {
         val intentFlags = // Required because IMMUTABLE isn't available in older versions
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE
@@ -150,7 +158,17 @@ class ProxyVpnService : VpnService(), IProtectSocket {
             .addAction(0, getString(R.string.vpn_active_notification_action), pendingServiceIntent)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            // VPN apps are exempt from the foreground service timeouts that would otherwise
+            // kill us mid-session, but only once the VPN itself is established (as it is here).
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun startVpn(
