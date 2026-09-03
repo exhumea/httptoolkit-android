@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.os.BundleCompat
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.google.android.gms.common.GooglePlayServicesUtil
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -45,6 +46,10 @@ import tech.httptoolkit.android.ui.HttpToolkitTheme
 const val START_VPN_REQUEST = 123
 const val INSTALL_CERT_REQUEST = 456
 const val ENABLE_NOTIFICATIONS_REQUEST = 101
+
+private const val PROXY_CONFIG_STATE_KEY = "proxy-config"
+private const val CONNECTION_STATE_KEY = "connection-state"
+private const val AWAITING_SETUP_RESULT_KEY = "awaiting-setup-result"
 
 enum class ConnectionState {
     DISCONNECTED,
@@ -85,6 +90,9 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
     // If connected/late-stage connecting, the proxy we're connected/trying to connect to. Otherwise null.
     private var currentProxyConfig: ProxyConfig? by mutableStateOf(activeVpnConfig())
+
+    // Waiting for user to handle VPN prompt/notification settings/cert installation:
+    private var awaitingSetupResult = false
 
     private var totalAppCount: Int by mutableIntStateOf(0)
     private var interceptedAppCount: Int by mutableIntStateOf(0)
@@ -181,6 +189,8 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
         app = this.application as HttpToolkitApplication
 
+        if (savedInstanceState != null) restoreSetupState(savedInstanceState)
+
         setContent {
             HttpToolkitTheme {
                 MainScreen(
@@ -251,6 +261,48 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 }
             }
         }
+    }
+
+    /**
+     * Setup sends the user off to system settings and permission prompts, so we can be recreated
+     * (or killed entirely, and then recreated) with an activity result still pending. We keep the
+     * config for that result to continue with, instead of dropping the user back to the start.
+     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putParcelable(PROXY_CONFIG_STATE_KEY, currentProxyConfig)
+        outState.putString(CONNECTION_STATE_KEY, mainState.name)
+        outState.putBoolean(AWAITING_SETUP_RESULT_KEY, awaitingSetupResult)
+    }
+
+    private fun restoreSetupState(savedInstanceState: Bundle) {
+        awaitingSetupResult = savedInstanceState.getBoolean(AWAITING_SETUP_RESULT_KEY)
+
+        // Beyond that, a live VPN is a better source of truth than anything saved, so we only fill
+        // in the gaps it leaves (i.e. where our initial state came out null/disconnected).
+
+        if (currentProxyConfig == null) {
+            currentProxyConfig = BundleCompat.getParcelable(
+                savedInstanceState,
+                PROXY_CONFIG_STATE_KEY,
+                ProxyConfig::class.java
+            )
+        }
+
+        if (mainState != ConnectionState.DISCONNECTED) return
+
+        val savedState = savedInstanceState.getString(CONNECTION_STATE_KEY)
+            ?.let { name -> ConnectionState.entries.find { it.name == name } }
+
+        if (savedState == ConnectionState.FAILED) {
+            mainState = ConnectionState.FAILED
+        } else if (savedState == ConnectionState.CONNECTING && awaitingSetupResult) {
+            // Nothing else in a recreated activity moves us on from CONNECTING, and that state
+            // offers the user no way out, so we only restore it while a result is still coming.
+            // Otherwise we stay disconnected, so they can simply start again.
+            mainState = ConnectionState.CONNECTING
+        }
+        // A saved CONNECTED state means nothing if the VPN service didn't survive with us.
     }
 
     override fun onResume() {
@@ -410,7 +462,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
 
         if (vpnNotConfigured) {
             // Show the 'Enable the VPN' prompt
-            startActivityForResult(vpnIntent, START_VPN_REQUEST)
+            startSetupActivityForResult(vpnIntent, START_VPN_REQUEST)
         } else {
             // VPN is trusted already, continue
             onActivityResult(START_VPN_REQUEST, RESULT_OK, null)
@@ -489,9 +541,15 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     }
 
     private fun testInterception() {
-        val certIsSystemTrusted = whereIsCertTrusted(
-            this.currentProxyConfig!! // Safe!! because you can only run tests while connected
-        ) == "system"
+        // Testing is only offered while we're connected, so we should always have a config here.
+        // If we somehow don't, we can still run the test, just without HTTPS:
+        val proxyConfig = this.currentProxyConfig
+        if (proxyConfig == null) {
+            Log.w(TAG, "Testing interception with no proxy config")
+            Sentry.captureMessage("Testing interception with no proxy config")
+        }
+
+        val certIsSystemTrusted = proxyConfig != null && whereIsCertTrusted(proxyConfig) == "system"
 
         // If we have a system cert, in theory we could use any browser. In practice though, some
         // (i.e. Firefox) ignore system certs to use their own settings. It's best to try and ensure
@@ -528,30 +586,44 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
+        val requestName = when (requestCode) {
+            START_VPN_REQUEST -> "start-vpn"
+            INSTALL_CERT_REQUEST -> "install-cert"
+            ENABLE_NOTIFICATIONS_REQUEST -> "enable-notifications"
+            // Results for registerForActivityResult launchers arrive here too, with their own
+            // request codes, but the super call above has already dispatched them:
+            else -> return
+        }
+        awaitingSetupResult = false
+
+        // Every step below continues the setup of a specific proxy. We can be recreated without
+        // one if our process was killed while the user was away in settings, and in that case
+        // there's no setup left to continue, so we reset instead:
+        val proxyConfig = currentProxyConfig
+        if (proxyConfig == null) {
+            Log.w(TAG, "Ignoring $requestName result received with no proxy config")
+            Sentry.captureMessage("Received $requestName result with no proxy config")
+            mainState = ConnectionState.DISCONNECTED
+            return
+        }
+
         val resultOk = resultCode == RESULT_OK ||
-            (requestCode == INSTALL_CERT_REQUEST && whereIsCertTrusted(currentProxyConfig!!) != null) ||
+            (requestCode == INSTALL_CERT_REQUEST && whereIsCertTrusted(proxyConfig) != null) ||
             (requestCode == ENABLE_NOTIFICATIONS_REQUEST && areNotificationsEnabled())
 
         Log.i(TAG,
-            "onActivityResult: " + (
-                when (requestCode) {
-                    START_VPN_REQUEST -> "start-vpn"
-                    INSTALL_CERT_REQUEST -> "install-cert"
-                    ENABLE_NOTIFICATIONS_REQUEST -> "enable-notifications"
-                    else -> requestCode.toString()
-                }
-            ) + " - result: " + (
+            "onActivityResult: $requestName - result: " + (
                 if (resultOk) "ok" else resultCode.toString()
             )
         )
 
         if (resultOk) {
-            if (requestCode == START_VPN_REQUEST && currentProxyConfig != null) {
+            if (requestCode == START_VPN_REQUEST) {
                 Log.i(TAG, "Installing cert...")
-                ensureCertificateTrusted(currentProxyConfig!!)
+                ensureCertificateTrusted(proxyConfig)
             } else if (requestCode == INSTALL_CERT_REQUEST) {
                 Log.i(TAG, "Cert installed, checking notification perms...")
-                deleteDownloadedCertsIfTrusted()
+                deleteDownloadedCertsIfTrusted(proxyConfig)
                 ensureNotificationsEnabled()
             } else if (requestCode == ENABLE_NOTIFICATIONS_REQUEST) {
                 Log.i(TAG, "Notifications OK, starting VPN...")
@@ -565,7 +637,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
             // via prompt. We redo the manual step regardless: either (on modern Android) manual is
             // required so this is just reshowing the instructions, or it was automated but that's not
             // working for some reason, in which case manual setup is a best-effort fallback.
-            launch { promptToManuallyInstallCert(currentProxyConfig!!.certificate) }
+            launch { promptToManuallyInstallCert(proxyConfig.certificate) }
         } else if (requestCode == ENABLE_NOTIFICATIONS_REQUEST) {
             // If we tried to enable notifications, and it didn't work (the user
             // ignored us) then try try again.
@@ -573,25 +645,38 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         } else if (resultCode == RESULT_CANCELED) {
             mainState = ConnectionState.DISCONNECTED
         } else {
-            val requestName = when (requestCode) {
-                START_VPN_REQUEST -> "start-vpn"
-                INSTALL_CERT_REQUEST -> "install-cert"
-                ENABLE_NOTIFICATIONS_REQUEST -> "enable-notifications"
-                else -> "other"
-            }
             Sentry.captureMessage("Non-OK result $resultCode for $requestName request")
             mainState = ConnectionState.FAILED
         }
     }
 
+    private fun startSetupActivityForResult(intent: Intent, requestCode: Int) {
+        awaitingSetupResult = true
+        startActivityForResult(intent, requestCode)
+    }
+
+    private fun launchNotificationPermissionRequest() {
+        awaitingSetupResult = true
+        notificationPermissionHandler.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
     private fun startVpn() {
+        val proxyConfig = currentProxyConfig
+        if (proxyConfig == null) {
+            // The service can't do anything without a config, so don't ask it to try:
+            Log.w(TAG, "Ignoring VPN start with no proxy config")
+            Sentry.captureMessage("VPN start requested with no proxy config")
+            mainState = if (isVpnActive()) ConnectionState.CONNECTED else ConnectionState.DISCONNECTED
+            return
+        }
+
         Log.i(TAG, "Starting VPN")
 
         mainState = ConnectionState.CONNECTING
 
         startService(Intent(this, ProxyVpnService::class.java).apply {
             action = START_VPN_ACTION
-            putExtra(IntentExtras.PROXY_CONFIG_EXTRA, currentProxyConfig)
+            putExtra(IntentExtras.PROXY_CONFIG_EXTRA, proxyConfig)
             putExtra(IntentExtras.UNINTERCEPTED_APPS_EXTRA, app.uninterceptedApps.toTypedArray())
             putExtra(IntentExtras.INTERCEPTED_PORTS_EXTRA, app.interceptedPorts.toIntArray())
         })
@@ -673,7 +758,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                     val certInstallIntent = KeyChain.createInstallIntent()
                     certInstallIntent.putExtra(EXTRA_NAME, "HTTP Toolkit CA")
                     certInstallIntent.putExtra(EXTRA_CERTIFICATE, certificate.encoded)
-                    startActivityForResult(certInstallIntent, INSTALL_CERT_REQUEST)
+                    startSetupActivityForResult(certInstallIntent, INSTALL_CERT_REQUEST)
                 }
                 .setCertSetupChoices()
                 .show()
@@ -728,7 +813,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
         if (isFinishing || isDestroyed) return // We might've been destroyed while saving
 
         if (certSaved) {
-            startActivityForResult(Intent(Settings.ACTION_SECURITY_SETTINGS), INSTALL_CERT_REQUEST)
+            startSetupActivityForResult(Intent(Settings.ACTION_SECURITY_SETTINGS), INSTALL_CERT_REQUEST)
         } else {
             // The instructions are useless without the file, and worse than useless if an
             // outdated cert from a previous setup is still sitting in downloads:
@@ -759,9 +844,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
      * because this is reached by skipping the prompt too, where a cert downloaded by an earlier
      * attempt may still be there, and may still be wanted.
      */
-    private fun deleteDownloadedCertsIfTrusted() {
-        val proxyConfig = currentProxyConfig ?: return
-
+    private fun deleteDownloadedCertsIfTrusted(proxyConfig: ProxyConfig) {
         launch {
             withContext(Dispatchers.IO) {
                 if (
@@ -837,14 +920,14 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 // still allowed to ask again. Be more insistent, and do so:
                 showNotificationPermissionRequiredPrompt() { ->
                     Log.i(TAG, "Asking for POST_NOTIFICATIONS after prompt")
-                    notificationPermissionHandler.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    launchNotificationPermissionRequest()
                 }
                 return
             } else if (!previouslyRejected) {
                 // This means we're asking for the first time - no detailed rationale and no
                 // fallbacks required, just ask for permission:
                 Log.i(TAG, "Asking for POST_NOTIFICATIONS directly")
-                notificationPermissionHandler.launch(Manifest.permission.POST_NOTIFICATIONS)
+                launchNotificationPermissionRequest()
                 return
             }
             // Otherwise, continue to the non-Tiramisu settings approach:
@@ -861,7 +944,7 @@ class MainActivity : ComponentActivity(), CoroutineScope by MainScope() {
                 Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                 Uri.fromParts("package", packageName, null)
             )
-            startActivityForResult(intent, ENABLE_NOTIFICATIONS_REQUEST)
+            startSetupActivityForResult(intent, ENABLE_NOTIFICATIONS_REQUEST)
         }
     }
 

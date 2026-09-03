@@ -82,9 +82,25 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         app = this.application as HttpToolkitApplication
 
         if (intent.action == START_VPN_ACTION) {
-            val proxyConfig = intent.getParcelableExtra<ProxyConfig>(IntentExtras.PROXY_CONFIG_EXTRA)!!
-            val uninterceptedApps = intent.getStringArrayExtra(IntentExtras.UNINTERCEPTED_APPS_EXTRA)!!.toSet()
-            val interceptedPorts = intent.getIntArrayExtra(IntentExtras.INTERCEPTED_PORTS_EXTRA)!!.toSet()
+            val proxyConfig = intent.getParcelableExtra<ProxyConfig>(IntentExtras.PROXY_CONFIG_EXTRA)
+            val uninterceptedAppsExtra = intent.getStringArrayExtra(IntentExtras.UNINTERCEPTED_APPS_EXTRA)
+            val interceptedPortsExtra = intent.getIntArrayExtra(IntentExtras.INTERCEPTED_PORTS_EXTRA)
+
+            if (proxyConfig == null || uninterceptedAppsExtra == null || interceptedPortsExtra == null) {
+                Log.w(TAG, "Ignoring VPN start request with incomplete configuration")
+                Sentry.captureMessage("VPN start request received with incomplete configuration")
+
+                // There's nothing we can usefully connect to, so we report a failed start rather
+                // than tearing down the process. If we're already running though, dropping a
+                // working session over a bad request would be far worse than ignoring it:
+                if (isActive()) return Service.START_REDELIVER_INTENT
+
+                stopVpn(failed = true)
+                return Service.START_NOT_STICKY
+            }
+
+            val uninterceptedApps = uninterceptedAppsExtra.toSet()
+            val interceptedPorts = interceptedPortsExtra.toSet()
 
             val vpnStarted = if (isActive())
                 restartVpn(proxyConfig, uninterceptedApps, interceptedPorts)
@@ -119,6 +135,7 @@ class ProxyVpnService : VpnService(), IProtectSocket {
         // We shouldn't ever hit a foreground service timeout, given our exemption, but if we
         // do then we must shut down promptly, or the system will kill the whole process.
         Log.w(TAG, "onTimeout called for foreground service type $fgsType")
+        Sentry.captureMessage("VPN service timed out (foreground service type $fgsType)")
         stopVpn()
     }
 

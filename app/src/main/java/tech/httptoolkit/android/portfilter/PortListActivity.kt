@@ -7,6 +7,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.*
+import tech.httptoolkit.android.HttpToolkitApplication
 import tech.httptoolkit.android.IntentExtras
 import tech.httptoolkit.android.ui.HttpToolkitTheme
 
@@ -18,8 +19,8 @@ class PortListActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val initialPorts = intent.getIntArrayExtra(IntentExtras.SELECTED_PORTS_EXTRA)!!
-            .toSet()
+        val initialPorts = intent.getIntArrayExtra(IntentExtras.SELECTED_PORTS_EXTRA)?.toSet()
+            ?: (application as HttpToolkitApplication).interceptedPorts
 
         currentPorts = initialPorts
 

@@ -12,6 +12,8 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -24,6 +26,13 @@ import androidx.compose.ui.zIndex
 import tech.httptoolkit.android.R
 import tech.httptoolkit.android.ui.AppConstants
 
+// The edited ports can outlive this composition (rotation, or the process being killed while the
+// screen is open) so they're saved as an int array, which a Bundle can hold directly:
+private val PortSetSaver = Saver<Set<Int>, IntArray>(
+    save = { it.toIntArray() },
+    restore = { it.toSet() }
+)
+
 @Composable
 fun PortListScreen(
     initialPorts: Set<Int>,
@@ -31,8 +40,8 @@ fun PortListScreen(
     defaultPorts: Set<Int>,
     modifier: Modifier = Modifier
 ) {
-    var ports by remember { mutableStateOf(initialPorts) }
-    var inputText by remember { mutableStateOf("") }
+    var ports by rememberSaveable(stateSaver = PortSetSaver) { mutableStateOf(initialPorts) }
+    var inputText by rememberSaveable { mutableStateOf("") }
     var showMenu by remember { mutableStateOf(false) }
 
     // Notify parent of changes
